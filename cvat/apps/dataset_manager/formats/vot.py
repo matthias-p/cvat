@@ -2,16 +2,16 @@
 #
 # SPDX-License-Identifier: MIT
 
-from tempfile import TemporaryDirectory
-import zipfile
 import io
+import zipfile
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import cv2
-from .registry import importer, exporter
-from cvat.apps.dataset_manager.bindings import CvatTaskDataExtractor, TaskData
 from datumaro.components.dataset import DatasetItem
 
+from cvat.apps.dataset_manager.bindings import CvatTaskDataExtractor, TaskData
+from .registry import importer, exporter
 
 attribute_mapping = {
     "appearance_change": "AC",
@@ -69,7 +69,7 @@ def _clear_attributes(attributes: dict):
 
 
 @importer(name="VOT", version="1.0", ext="ZIP")
-def vot_importer(file_object, task_data: TaskData, **options):
+def vot_importer(file_object, task_data: TaskData):
     if zipfile.is_zipfile(file_object):
         with TemporaryDirectory() as temp_dir:
             zipfile.ZipFile(file_object).extractall(temp_dir)
@@ -77,15 +77,16 @@ def vot_importer(file_object, task_data: TaskData, **options):
             gt_file_path = p / "groundtruth.txt"
             att_files = list(p.glob("*.tag"))
 
-            groundtruths = []
             attributes = {}
 
+            assert gt_file_path.exists() and gt_file_path.is_file()
             with open(gt_file_path, "r") as gt_file:
                 groundtruths = gt_file.read().rstrip("\n").splitlines()
 
-            for att_file in att_files:
-                with open(att_file, "r") as att_f:
-                    attributes[att_file.stem] = att_f.read().rstrip("\n").splitlines()
+            if att_files is not None:
+                for att_file in att_files:
+                    with open(att_file, "r") as att_f:
+                        attributes[att_file.stem] = att_f.read().rstrip("\n").splitlines()
 
             for x, line in enumerate(groundtruths):
                 if "nan" in line:
@@ -101,14 +102,14 @@ def vot_importer(file_object, task_data: TaskData, **options):
                     type="rectangle",
                     points=[line[0], line[1], line[4], line[5]],
                     occluded=False,
-                    attributes=[task_data.Attribute(name=name, value=True if value == "1" else False) for name, value in attribute_list],
+                    attributes=[task_data.Attribute(name=name, value=True if value == "1" else False)
+                                for name, value in attribute_list],
                     label="object",
                     source="manual",
                     frame=x,
                 )
 
                 task_data.add_shape(shape)
-
 
 
 @exporter(name="VOT", version="1.0", ext="ZIP")
@@ -177,6 +178,7 @@ def vot_exporter(file_object, task_data: TaskData, save_images=False):
         zip_file.writestr("sequence", seq_buffer.getvalue())
 
     file_object.write(zip_buffer.getvalue())
+
 
 """
 Example for attributes which are used in VOT
