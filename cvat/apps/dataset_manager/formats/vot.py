@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-import io
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -11,6 +10,7 @@ import cv2
 from datumaro.components.dataset import DatasetItem
 
 from cvat.apps.dataset_manager.bindings import CvatTaskDataExtractor, TaskData
+from cvat.apps.dataset_manager.util import make_zip_archive
 from .registry import importer, exporter
 
 attribute_mapping = {
@@ -35,6 +35,9 @@ def _map_attributes(attributes: dict):
 
 
 def _make_info(task_meta: dict):
+    """
+    Create dictionary with metainfo for the sequence
+    """
     meta_info = {}
     meta_info["sequence_name"] = task_meta.get("name")
     meta_info["spectrum"] = "color"
@@ -57,10 +60,13 @@ def _make_info(task_meta: dict):
 
 
 def _clear_attributes(attributes: dict):
+    """
+    Remove attributes which are False permanently and are not part of the VOT attributes
+    """
     attribute_copy = attributes.copy()
     for key, values in attributes.items():
         for value in values:
-            if value == 1 and key in attribute_mapping.keys():
+            if value == 1 and (key in attribute_mapping.keys() or key in attribute_mapping.items()):
                 break
         else:
             attribute_copy.pop(key)
@@ -117,16 +123,21 @@ def vot_exporter(file_object, task_data: TaskData, save_images=False):
     extractor = CvatTaskDataExtractor(task_data=task_data, include_images=save_images)
     task_meta = task_data.meta.get("task")
 
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+    with TemporaryDirectory() as tempdir:
+        tempdir_path = Path(tempdir)
+        if save_images:
+            image_path = tempdir_path / "data"
+            image_path.mkdir(exist_ok=True)
+
         attributes = {}
         groundtruths = []
         dataset_item: DatasetItem
-        for dataset_item in extractor._items:
+        for x, dataset_item in enumerate(extractor._items, start=1):
             if save_images and dataset_item.has_image:
                 if dataset_item.image.has_data and dataset_item.image.has_size:
                     _, data = cv2.imencode(".png", dataset_item.image.data)
-                    zip_file.writestr("data/" + dataset_item.id + ".png", data)
+                    with open(image_path / f"{x}.png", "wb") as img_file:
+                        img_file.write(data)
             for annotation in dataset_item.annotations:
                 xtl = annotation.points[0]
                 ytl = annotation.points[1]
@@ -145,39 +156,33 @@ def vot_exporter(file_object, task_data: TaskData, save_images=False):
 
         # write .tag files
         attributes = _clear_attributes(attributes)
-        attributes_files = []
         for key, values in attributes.items():
-            att_buffer = io.StringIO()
-            for value in values:
-                att_buffer.write(f"{value}\n")
-            attributes_files.append((f"{key}.tag", att_buffer))
-        for file_name, data in attributes_files:
-            zip_file.writestr(file_name, data.getvalue())
+            with open(tempdir_path / f"{key}.tag", "w") as att_file:
+                for value in values:
+                    att_file.write(f"{value}\n")
 
+        # write gt file
+        with open(tempdir_path / "groundtruth.txt", "w") as gt_file:
+            for line in groundtruths:
+                gt_file.write(f"{line}\n")
+
+        # Those files are normally not written in the VOT challenge but may help other people with their tasks
         # write info.txt file
         info = _make_info(task_meta)
         info["attributes"] = ",".join(_map_attributes(attributes))
-        meta_buffer = io.StringIO()
-        for key, value in info.items():
-            meta_buffer.write(f"{key}={value}\n")
-        zip_file.writestr("info.txt", meta_buffer.getvalue())
-
-        # write gt file
-        gt_buffer = io.StringIO()
-        for line in groundtruths:
-            gt_buffer.write(f"{line}\n")
-        zip_file.writestr("groundtruth.txt", gt_buffer.getvalue())
+        with open(tempdir_path / "info.txt", "w") as info_file:
+            for key, value in info.items():
+                info_file.write(f"{key}={value}\n")
 
         # write sequence file
-        seq_buffer = io.StringIO()
-        seq_buffer.write("channels.{spectrum}=data/%08d.png\n")
-        seq_buffer.write(f"start_frame={info.get('start_frame')}\n")
-        seq_buffer.write("format=default\n")
-        seq_buffer.write("fps={fps}\n")
-        seq_buffer.write("name={sequence_name}")
-        zip_file.writestr("sequence", seq_buffer.getvalue())
+        with open(tempdir_path / "sequence", "w") as seq_file:
+            seq_file.write("channels.{spectrum}=data/%08d.png\n")
+            seq_file.write(f"start_frame={info.get('start_frame')}\n")
+            seq_file.write("format=default\n")
+            seq_file.write("fps={fps}\n")
+            seq_file.write("name={sequence_name}")
 
-    file_object.write(zip_buffer.getvalue())
+        make_zip_archive(tempdir, file_object)
 
 
 """
